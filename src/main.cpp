@@ -1,7 +1,11 @@
 #include <Arduino.h>
 #include <ESP32Servo.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <freertos/queue.h>
 
 Servo myServo;
+QueueHandle_t stateFanQueue;
 
 // 🔹 **Định nghĩa chân GPIO**
 #define TRIG_PIN1        18
@@ -14,6 +18,8 @@ Servo myServo;
 #define PUMP_RELAY_PIN   27  // Relay điều khiển máy bơm
 #define FAN_RELAY_PIN    25  // Relay điều khiển quạt
 #define SERVO_PIN        17  // Chân điều khiển Servo
+
+
 
 // 🔹 **Khai báo nguyên mẫu hàm**
 void readUltrasonicSensor(void *pvParameters);
@@ -39,6 +45,11 @@ void setup() {
 
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(FAN_RELAY_PIN, LOW);
+
+    // Create Queue
+    
+    stateFanQueue = xQueueCreate(1, sizeof(char[4])); 
+
 
     // 🔹 **Tạo các task FreeRTOS**
     xTaskCreate(readUltrasonicSensor, "readUltrasonicSensor", 1000, NULL, 2, NULL);
@@ -81,7 +92,7 @@ void readUltrasonicSensor(void *pvParameters) {
 void handlePumpControl(void *pvParameters) {
     bool isPumpOn = false;
     bool lastPumpButtonState = HIGH;
-
+    char stateFan[4];
     for (;;) {
         bool pumpButtonState = digitalRead(PUMP_BUTTON_PIN);
 
@@ -91,6 +102,10 @@ void handlePumpControl(void *pvParameters) {
         }
 
         lastPumpButtonState = pumpButtonState;
+        if ( xQueueReceive(stateFanQueue, &stateFan,0)==pdPASS)
+          {
+            Serial.println( stateFan);
+          }
         vTaskDelay(pdMS_TO_TICKS(50));  // Debounce nút nhấn
     }
 }
@@ -102,13 +117,14 @@ void handleServoControl(void *pvParameters) {
 
     for (;;) {
         bool currentServoButtonState = digitalRead(SERVO_BUTTON_PIN);
+        
 
         if (currentServoButtonState == LOW && lastServoButtonState == HIGH) {
             isServoAt90 = !isServoAt90;
             myServo.write(isServoAt90 ? 90 : 0);
         }
-
         lastServoButtonState = currentServoButtonState;
+        
         vTaskDelay(pdMS_TO_TICKS(50));  // Debounce
     }
 }
@@ -120,10 +136,17 @@ void handleFanControl(void *pvParameters) {
 
     for (;;) {
         bool fanButtonState = digitalRead(FAN_BUTTON_PIN);
+        char stateFanQueueValue[4];
+        
+        
 
         if (fanButtonState == LOW && lastFanButtonState == HIGH) {
             isFanOn = !isFanOn;
             digitalWrite(FAN_RELAY_PIN, isFanOn ? HIGH : LOW);
+            strcpy(stateFanQueueValue, isFanOn ? "ON" : "OFF"); 
+            xQueueSend(stateFanQueue, &stateFanQueueValue, portMAX_DELAY);
+          
+            
         }
 
         lastFanButtonState = fanButtonState;
