@@ -5,23 +5,45 @@
 #include <freertos/queue.h>
 #include <PubSubClient.h>
 #include <WiFi.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
 
 Servo myServo;
 QueueHandle_t stateFanQueue;
 QueueHandle_t statePumpQueue;
 QueueHandle_t stateServorQueue;
+QueueHandle_t temperaturaQueue;
+QueueHandle_t humidityQueue;
+QueueHandle_t airQueue;
 
-// 🔹 **Định nghĩa chân GPIO**
+
+#define OLED_ADDR   0x3C  
+#define DHTTYPE     DHT11 
+
+#define DHTPIN      4     // Cảm biến DHT11
+#define AIR_SENSOR  35    // Cảm biến khí (ADC)
+
+#define CUSTOM_SDA  21    // I2C OLED SDA
+#define CUSTOM_SCK  22    // I2C OLED SCL
+
+#define OLED_BUTTON_PIN  15  // Nút nhấn OLED
+
+// 🔹 **Chân siêu âm**
 #define TRIG_PIN1        18
 #define ECHO_PIN1        19
 
-#define PUMP_BUTTON_PIN  26  // Nút nhấn điều khiển máy bơm
-#define FAN_BUTTON_PIN   33  // Nút nhấn điều khiển quạt
-#define SERVO_BUTTON_PIN 32  // Nút nhấn điều khiển servo
+// 🔹 **Nút nhấn**
+#define PUMP_BUTTON_PIN  12  // Nút nhấn bơm
+#define FAN_BUTTON_PIN   14  // Nút nhấn quạt
+#define SERVO_BUTTON_PIN 13  // Nút nhấn servo
 
-#define PUMP_RELAY_PIN   27  // Relay điều khiển máy bơm
-#define FAN_RELAY_PIN    25  // Relay điều khiển quạt
-#define SERVO_PIN        17  // Chân điều khiển Servo
+// 🔹 **Điều khiển relay**
+#define PUMP_RELAY_PIN   27  // Relay bơm
+#define FAN_RELAY_PIN    26  // Relay quạt
+#define SERVO_PIN        17  // Servo PWM
+
 
 WiFiClient espClient;
 PubSubClient client(espClient);
@@ -61,11 +83,25 @@ void handleServoControl(void *pvParameters);
 void handleFanControl(void *pvParameters);
 void mqttLoopTask(void *pvParameters);
 void callback(char *topic, byte *payload, unsigned int length);
+void vReceiverSensor(void *pvParameters);
+void vSenderDHTTemperature(void *pvParameters);
+void vSenderDHTHumidity(void *pvParameters);
+void vSenderAIR(void *pvParameters);
+
+Adafruit_SSD1306 display(128, 64, &Wire, -1);
+DHT dht(DHTPIN, DHTTYPE);
+
+
 
 void setup() {
     Serial.begin(9600);
     myServo.attach(SERVO_PIN);
     myServo.write(90);  // Gán vị trí ban đầu cho Servo
+    Wire.begin();
+    dht.begin();
+    pinMode(AIR_SENSOR, INPUT); 
+    
+
 
     // 🔹 **Cấu hình chân I/O**
     pinMode(TRIG_PIN1, OUTPUT);
@@ -77,6 +113,7 @@ void setup() {
 
     pinMode(PUMP_RELAY_PIN, OUTPUT);
     pinMode(FAN_RELAY_PIN, OUTPUT);
+    pinMode(OLED_BUTTON_PIN, INPUT_PULLUP);
 
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(FAN_RELAY_PIN, LOW);
@@ -86,6 +123,18 @@ void setup() {
     stateFanQueue = xQueueCreate(5, sizeof(char[4])); 
     statePumpQueue = xQueueCreate(5, sizeof(char[4]));
     stateServorQueue = xQueueCreate(5, sizeof(char[4]));
+    temperaturaQueue = xQueueCreate(1, sizeof(float));
+    humidityQueue = xQueueCreate(1, sizeof(float));
+    airQueue = xQueueCreate(1, sizeof(float));
+
+    display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
+    display.clearDisplay();
+    display.setTextColor(WHITE);
+    display.setTextSize(1);
+    display.setCursor(20, 20);
+    display.println("Starting....");
+    display.display();
+
 
 
    // Kết nối WiFi
@@ -138,6 +187,11 @@ void setup() {
     xTaskCreate(handleServoControl, "handleServoControl", 8192, NULL, 4, NULL);
     xTaskCreate(handleFanControl, "handleFanControl", 8192, NULL, 4, NULL);
     xTaskCreate( mqttLoopTask, "mqttLoopTask", 8192, NULL, 5, NULL);
+
+    xTaskCreate(vSenderDHTTemperature, "SenderTemp", 2048, NULL, 1, NULL);
+    xTaskCreate(vSenderDHTHumidity, "SenderHumi", 2048, NULL, 1, NULL);
+    xTaskCreate(vSenderAIR, "SenderAir", 2048, NULL, 1, NULL);
+    xTaskCreate(vReceiverSensor, "Receiver", 4096, NULL, 1, NULL);
     
 }
 
@@ -284,3 +338,131 @@ void callback(char *topic, byte *payload, unsigned int length) {
     strcpy(stateFanQueueValue, isFanOn ? "ON" : "OFF"); 
         xQueueSend(stateFanQueue, &stateFanQueueValue, 0);     
   }
+
+  
+void vSenderDHTTemperature(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    for (;;) {
+        float temperatureValue = dht.readTemperature();
+        if (!isnan(temperatureValue) && temperatureValue > 0) {
+            xQueueSend(temperaturaQueue, &temperatureValue, portMAX_DELAY);
+        }
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
+}
+
+void vSenderDHTHumidity(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    for (;;) {
+        float humidityValue = dht.readHumidity();
+        if (!isnan(humidityValue) && humidityValue > 0) {
+            xQueueSend(humidityQueue, &humidityValue, portMAX_DELAY);
+        }
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
+}
+
+void vSenderAIR(void *pvParameters) {
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    for (;;) {
+        float airValue = analogRead(AIR_SENSOR);
+        if (airValue > 0) {
+            xQueueSend(airQueue, &airValue, portMAX_DELAY);
+        }
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
+}
+
+
+
+void vReceiverSensor(void *pvParameters) {
+  float temp = 0, humi = 0, air = 0;
+  bool lastOledButtonState = HIGH;
+  bool isSwitch = false;
+  int currentScreen = 0;
+
+  for (;;) {
+    int OledButtonState = digitalRead(OLED_BUTTON_PIN);
+    bool updated = false;
+    char statePump[4];
+    
+    // Kiểm tra trạng thái nút bấm OLED
+    if (OledButtonState == LOW && lastOledButtonState == HIGH) {
+      currentScreen = (currentScreen + 1) % 3;  // Chuyển màn hình
+     // delay(200);  // Chống hiện tượng nhấn nút nhiều lần do phản hồi
+    }
+    lastOledButtonState = OledButtonState;
+    
+    // Dựa trên màn hình hiện tại để hiển thị dữ liệu
+    switch (currentScreen) {
+      case 0: 
+      if ( xQueueReceive(statePumpQueue, &statePump,0)==pdPASS)
+          {
+            Serial.println( statePump);
+          }
+        display.clearDisplay();  // Xóa màn hình
+        display.setCursor(20, 20);
+        display.print(statePump);    
+        display.display();
+        break;
+
+      case 1:
+        updated = false;
+
+        // Nhận dữ liệu từ các queue và hiển thị trên màn hình OLED
+        if (xQueueReceive(temperaturaQueue, &temp, pdMS_TO_TICKS(1000)) == pdPASS) {
+          if (!isnan(temp) && temp > 0) {
+            Serial.print("Temperature: ");
+            Serial.println(temp);
+            updated = true;
+          }
+        }
+
+        if (xQueueReceive(humidityQueue, &humi, pdMS_TO_TICKS(1000)) == pdPASS) {
+          if (!isnan(humi) && humi > 0) {
+            Serial.print("Humidity: ");
+            Serial.println(humi);
+            updated = true;
+          }
+        }
+
+        if (xQueueReceive(airQueue, &air, pdMS_TO_TICKS(1000)) == pdPASS) {
+          if (air > 0) {
+            Serial.print("Air: ");
+            Serial.println(air);
+            updated = true;
+          }
+        }
+
+        // Hiển thị dữ liệu nếu có sự thay đổi
+        if (updated) {
+          display.clearDisplay();  // Xóa màn hình cũ
+          display.setCursor(10, 10);
+          display.print("Temp: ");
+          display.print(temp);
+          display.println(" C");
+
+          display.setCursor(10, 25);
+          display.print("Humidity: ");
+          display.print(humi);
+          display.println(" %");
+
+          display.setCursor(10, 40);
+          display.print("Air: ");
+          display.println(air);
+          
+          display.display();  // Cập nhật màn hình
+        }
+        break;
+
+      case 2:
+        display.clearDisplay();  // Xóa màn hình
+        display.setCursor(20, 20);
+        display.print("Hello");
+        display.display();
+        break;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(200));  // Giảm tần suất kiểm tra nút
+  }
+}
