@@ -6,6 +6,8 @@
 
 Servo myServo;
 QueueHandle_t stateFanQueue;
+QueueHandle_t statePumpQueue;
+QueueHandle_t stateServorQueue;
 
 // 🔹 **Định nghĩa chân GPIO**
 #define TRIG_PIN1        18
@@ -83,7 +85,6 @@ void readUltrasonicSensor(void *pvParameters) {
         float foodAvailable = (1.0 - (distance / distanceOrigin)) * 100.0;
         Serial.print("Food rate: ");
         Serial.println(foodAvailable);
-
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
@@ -92,7 +93,7 @@ void readUltrasonicSensor(void *pvParameters) {
 void handlePumpControl(void *pvParameters) {
     bool isPumpOn = false;
     bool lastPumpButtonState = HIGH;
-    char stateFan[4];
+    char statePumpQueueValue[4];
     for (;;) {
         bool pumpButtonState = digitalRead(PUMP_BUTTON_PIN);
 
@@ -100,12 +101,12 @@ void handlePumpControl(void *pvParameters) {
             isPumpOn = !isPumpOn;
             digitalWrite(PUMP_RELAY_PIN, isPumpOn ? HIGH : LOW);
         }
-
+        strcpy(statePumpQueueValue, isPumpOn ? "ON" : "OFF"); 
+        xQueueSend(statePumpQueue, &statePumpQueueValue, portMAX_DELAY);
+        
+        
         lastPumpButtonState = pumpButtonState;
-        if ( xQueueReceive(stateFanQueue, &stateFan,0)==pdPASS)
-          {
-            Serial.println( stateFan);
-          }
+        
         vTaskDelay(pdMS_TO_TICKS(50));  // Debounce nút nhấn
     }
 }
@@ -114,21 +115,24 @@ void handlePumpControl(void *pvParameters) {
 void handleServoControl(void *pvParameters) {
     bool isServoAt90 = false;
     bool lastServoButtonState = HIGH;
+    
 
     for (;;) {
         bool currentServoButtonState = digitalRead(SERVO_BUTTON_PIN);
-        
+        char stateServoQueueValue[4];
 
         if (currentServoButtonState == LOW && lastServoButtonState == HIGH) {
             isServoAt90 = !isServoAt90;
             myServo.write(isServoAt90 ? 90 : 0);
         }
+        strcpy(stateServoQueueValue, isServoAt90 ? "ON" : "OFF"); 
+        xQueueSend(stateServorQueue, &stateServoQueueValue, portMAX_DELAY);
         lastServoButtonState = currentServoButtonState;
         
         vTaskDelay(pdMS_TO_TICKS(50));  // Debounce
     }
 }
-
+ 
 // 🔹 **Task điều khiển quạt**
 void handleFanControl(void *pvParameters) {
     bool isFanOn = false;
@@ -137,16 +141,11 @@ void handleFanControl(void *pvParameters) {
     for (;;) {
         bool fanButtonState = digitalRead(FAN_BUTTON_PIN);
         char stateFanQueueValue[4];
-        
-        
-
         if (fanButtonState == LOW && lastFanButtonState == HIGH) {
             isFanOn = !isFanOn;
             digitalWrite(FAN_RELAY_PIN, isFanOn ? HIGH : LOW);
             strcpy(stateFanQueueValue, isFanOn ? "ON" : "OFF"); 
             xQueueSend(stateFanQueue, &stateFanQueueValue, portMAX_DELAY);
-          
-            
         }
 
         lastFanButtonState = fanButtonState;
