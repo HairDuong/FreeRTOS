@@ -14,9 +14,8 @@ Servo myServo;
 QueueHandle_t stateFanQueue;
 QueueHandle_t statePumpQueue;
 QueueHandle_t stateServorQueue;
-QueueHandle_t temperaturaQueue;
-QueueHandle_t humidityQueue;
-QueueHandle_t airQueue;
+QueueHandle_t sensorQueue;
+QueueHandle_t foodRate;
 
 
 #define OLED_ADDR   0x3C  
@@ -28,7 +27,7 @@ QueueHandle_t airQueue;
 #define CUSTOM_SDA  21    // I2C OLED SDA
 #define CUSTOM_SCK  22    // I2C OLED SCL
 
-#define OLED_BUTTON_PIN  15  // Nút nhấn OLED
+#define OLED_BUTTON_PIN  16  // Nút nhấn OLED
 
 // 🔹 **Chân siêu âm**
 #define TRIG_PIN1        18
@@ -84,9 +83,15 @@ void handleFanControl(void *pvParameters);
 void mqttLoopTask(void *pvParameters);
 void callback(char *topic, byte *payload, unsigned int length);
 void vReceiverSensor(void *pvParameters);
-void vSenderDHTTemperature(void *pvParameters);
-void vSenderDHTHumidity(void *pvParameters);
-void vSenderAIR(void *pvParameters);
+// Định nghĩa cấu trúc chứa cả 3 giá trị
+struct SensorData {
+    float temperature;
+    float humidity;
+    float air;
+};
+
+void vReceiverSensor(void *pvParameters);
+void vSender(void *pvParameters);
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 DHT dht(DHTPIN, DHTTYPE);
@@ -123,10 +128,7 @@ void setup() {
     stateFanQueue = xQueueCreate(5, sizeof(char[4])); 
     statePumpQueue = xQueueCreate(5, sizeof(char[4]));
     stateServorQueue = xQueueCreate(5, sizeof(char[4]));
-    temperaturaQueue = xQueueCreate(1, sizeof(float));
-    humidityQueue = xQueueCreate(1, sizeof(float));
-    airQueue = xQueueCreate(1, sizeof(float));
-
+    sensorQueue = xQueueCreate(3, sizeof(SensorData));  // Queue chứa 3 phần tử, mỗi phần tử là SensorData
     display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
     display.clearDisplay();
     display.setTextColor(WHITE);
@@ -187,11 +189,8 @@ void setup() {
     xTaskCreate(handleServoControl, "handleServoControl", 8192, NULL, 4, NULL);
     xTaskCreate(handleFanControl, "handleFanControl", 8192, NULL, 4, NULL);
     xTaskCreate( mqttLoopTask, "mqttLoopTask", 8192, NULL, 5, NULL);
-
-    xTaskCreate(vSenderDHTTemperature, "SenderTemp", 2048, NULL, 1, NULL);
-    xTaskCreate(vSenderDHTHumidity, "SenderHumi", 2048, NULL, 1, NULL);
-    xTaskCreate(vSenderAIR, "SenderAir", 2048, NULL, 1, NULL);
-    xTaskCreate(vReceiverSensor, "Receiver", 4096, NULL, 1, NULL);
+    xTaskCreate(vSender, "Sender", 2048, NULL, 1, NULL);
+    xTaskCreate(vReceiverSensor, "Receiver", 8192, NULL, 4, NULL);
     
 }
 
@@ -205,8 +204,6 @@ void mqttLoopTask(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(10));  // Tránh chiếm CPU quá mức
     }
 }
-
-
 // 🔹 **Task đọc cảm biến siêu âm**
 void readUltrasonicSensor(void *pvParameters) {
     long duration1;
@@ -314,23 +311,13 @@ void callback(char *topic, byte *payload, unsigned int length) {
   
     if (String(topic) == topic4) isFanOn = (message == "ON");
     if (String(topic) == topic5) isPumpOn = (message == "ON");
-    //  if (String(topic) == topic6) currentMode = (message == "MANUAL") ? MANUAL : AUTOMATIC;
     if (String(topic) == topic7) {
         isServoAt90 = (message == "ON");
         myServo.write(isServoAt90 ? 90 : 0);
     }
-    // if (String(topic) == topic8) isBulbOn = (message == "ON");
-    // if (String(topic) == topic9) isPump2On = (message == "ON");
-    // if (String(topic) == topic15) targetHour = message.toInt() ;
-    // if (String(topic) == topic16) targetMinute = message.toInt() ;
-    // if (String(topic) == topic17) 
-    // {targetSecond = message.toInt() ;
-    //  targetSecondclose = targetSecond +5;}
-    
     digitalWrite(FAN_RELAY_PIN, isFanOn ? HIGH : LOW);
     digitalWrite(PUMP_RELAY_PIN, isPumpOn ? HIGH : LOW);
-    // digitalWrite(PUMP2_RELAY_PIN, isPump2On ? HIGH : LOW);
-    // digitalWrite(BULB_RELAY_PIN, isBulbOn ? HIGH : LOW);
+    
     strcpy(statePumpQueueValue, isPumpOn ? "ON" : "OFF"); 
         xQueueSend(statePumpQueue, &statePumpQueueValue, 0);
     strcpy(stateServoQueueValue, isServoAt90 ? "ON" : "OFF"); 
@@ -340,129 +327,75 @@ void callback(char *topic, byte *payload, unsigned int length) {
   }
 
   
-void vSenderDHTTemperature(void *pvParameters) {
+  void vSender(void *pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
     for (;;) {
-        float temperatureValue = dht.readTemperature();
-        if (!isnan(temperatureValue) && temperatureValue > 0) {
-            xQueueSend(temperaturaQueue, &temperatureValue, portMAX_DELAY);
+        SensorData data;
+
+        // Đọc dữ liệu từ các cảm biến
+        data.temperature = dht.readTemperature();
+        data.humidity = dht.readHumidity();
+        data.air = analogRead(AIR_SENSOR);
+
+        // Kiểm tra dữ liệu hợp lệ trước khi gửi
+        if (!isnan(data.temperature) && data.temperature > 0 &&
+            !isnan(data.humidity) && data.humidity > 0 &&
+            data.air > 0) {
+            xQueueSend(sensorQueue, &data, portMAX_DELAY);
         }
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
     }
 }
-
-void vSenderDHTHumidity(void *pvParameters) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    for (;;) {
-        float humidityValue = dht.readHumidity();
-        if (!isnan(humidityValue) && humidityValue > 0) {
-            xQueueSend(humidityQueue, &humidityValue, portMAX_DELAY);
-        }
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
-    }
-}
-
-void vSenderAIR(void *pvParameters) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    for (;;) {
-        float airValue = analogRead(AIR_SENSOR);
-        if (airValue > 0) {
-            xQueueSend(airQueue, &airValue, portMAX_DELAY);
-        }
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
-    }
-}
-
-
 
 void vReceiverSensor(void *pvParameters) {
-  float temp = 0, humi = 0, air = 0;
-  bool lastOledButtonState = HIGH;
-  bool isSwitch = false;
-  int currentScreen = 0;
+    SensorData sensorData = {0, 0, 0};
+    bool lastOledButtonState = HIGH;
+    int currentScreen = 0;
 
-  for (;;) {
-    int OledButtonState = digitalRead(OLED_BUTTON_PIN);
-    bool updated = false;
-    char statePump[4];
-    
-    // Kiểm tra trạng thái nút bấm OLED
-    if (OledButtonState == LOW && lastOledButtonState == HIGH) {
-      currentScreen = (currentScreen + 1) % 3;  // Chuyển màn hình
-     // delay(200);  // Chống hiện tượng nhấn nút nhiều lần do phản hồi
-    }
-    lastOledButtonState = OledButtonState;
-    
-    // Dựa trên màn hình hiện tại để hiển thị dữ liệu
-    switch (currentScreen) {
-      case 0: 
-      if ( xQueueReceive(statePumpQueue, &statePump,0)==pdPASS)
-          {
-            Serial.println( statePump);
-          }
-        display.clearDisplay();  // Xóa màn hình
-        display.setCursor(20, 20);
-        display.print(statePump);    
+    for (;;) {
+        int OledButtonState = digitalRead(OLED_BUTTON_PIN);
+        Serial.print("Button State: "); Serial.println(OledButtonState);
+
+        if (OledButtonState == LOW && lastOledButtonState == HIGH) {
+            currentScreen = (currentScreen + 1) % 2;
+            Serial.print("Current Screen: "); Serial.println(currentScreen);
+            delay(300);  // Tránh debounce
+        }
+        lastOledButtonState = OledButtonState;
+
+        display.clearDisplay();
+
+        if (currentScreen == 0) {
+            char statePump[4];
+            char stateFan[4];
+            char stateServo[4];
+
+            xQueueReceive(statePumpQueue, &statePump, 0);
+            xQueueReceive(stateFanQueue, &stateFan, 0);
+            xQueueReceive(stateServorQueue, &stateServo, 0);
+
+            display.setCursor(10, 20);
+            display.print("Pump: "); display.print(statePump);
+
+            display.setCursor(10, 35);
+            display.print("Fan: "); display.print(stateFan);
+
+            display.setCursor(10, 50);
+            display.print("Servo: "); display.print(stateServo);
+        } else {
+            if (xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) == pdPASS) {
+                display.setCursor(10, 10);
+                display.print("Temp: "); display.print(sensorData.temperature); display.println(" C");
+
+                display.setCursor(10, 25);
+                display.print("Humidity: "); display.print(sensorData.humidity); display.println(" %");
+
+                display.setCursor(10, 40);
+                display.print("Air: "); display.println(sensorData.air);
+            }
+        }
+
         display.display();
-        break;
-
-      case 1:
-        updated = false;
-
-        // Nhận dữ liệu từ các queue và hiển thị trên màn hình OLED
-        if (xQueueReceive(temperaturaQueue, &temp, pdMS_TO_TICKS(1000)) == pdPASS) {
-          if (!isnan(temp) && temp > 0) {
-            Serial.print("Temperature: ");
-            Serial.println(temp);
-            updated = true;
-          }
-        }
-
-        if (xQueueReceive(humidityQueue, &humi, pdMS_TO_TICKS(1000)) == pdPASS) {
-          if (!isnan(humi) && humi > 0) {
-            Serial.print("Humidity: ");
-            Serial.println(humi);
-            updated = true;
-          }
-        }
-
-        if (xQueueReceive(airQueue, &air, pdMS_TO_TICKS(1000)) == pdPASS) {
-          if (air > 0) {
-            Serial.print("Air: ");
-            Serial.println(air);
-            updated = true;
-          }
-        }
-
-        // Hiển thị dữ liệu nếu có sự thay đổi
-        if (updated) {
-          display.clearDisplay();  // Xóa màn hình cũ
-          display.setCursor(10, 10);
-          display.print("Temp: ");
-          display.print(temp);
-          display.println(" C");
-
-          display.setCursor(10, 25);
-          display.print("Humidity: ");
-          display.print(humi);
-          display.println(" %");
-
-          display.setCursor(10, 40);
-          display.print("Air: ");
-          display.println(air);
-          
-          display.display();  // Cập nhật màn hình
-        }
-        break;
-
-      case 2:
-        display.clearDisplay();  // Xóa màn hình
-        display.setCursor(20, 20);
-        display.print("Hello");
-        display.display();
-        break;
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
-
-    vTaskDelay(pdMS_TO_TICKS(200));  // Giảm tần suất kiểm tra nút
-  }
 }
