@@ -15,7 +15,7 @@ QueueHandle_t stateFanQueue;
 QueueHandle_t statePumpQueue;
 QueueHandle_t stateServorQueue;
 QueueHandle_t sensorQueue;
-QueueHandle_t foodRate;
+QueueHandle_t foodRateQueue;
 
 
 #define OLED_ADDR   0x3C  
@@ -129,6 +129,7 @@ void setup() {
     statePumpQueue = xQueueCreate(5, sizeof(char[4]));
     stateServorQueue = xQueueCreate(5, sizeof(char[4]));
     sensorQueue = xQueueCreate(3, sizeof(SensorData));  // Queue chứa 3 phần tử, mỗi phần tử là SensorData
+    foodRateQueue = xQueueCreate(2, sizeof(float));
     display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
     display.clearDisplay();
     display.setTextColor(WHITE);
@@ -208,6 +209,7 @@ void mqttLoopTask(void *pvParameters) {
 void readUltrasonicSensor(void *pvParameters) {
     long duration1;
     float distanceOrigin = 8.0;
+    float foodRateValue= 0.0;
 
     for (;;) {
         digitalWrite(TRIG_PIN1, LOW);
@@ -223,6 +225,8 @@ void readUltrasonicSensor(void *pvParameters) {
         Serial.println(distance);
 
         float foodAvailable = (1.0 - (distance / distanceOrigin)) * 100.0;
+        foodRateValue = foodAvailable;
+        xQueueSend(foodRateQueue, &foodRateValue, 0);
         Serial.print("Food rate: ");
         Serial.println(foodAvailable);
         vTaskDelay(pdMS_TO_TICKS(500));
@@ -369,6 +373,7 @@ void vReceiverSensor(void *pvParameters) {
             char statePump[4];
             char stateFan[4];
             char stateServo[4];
+           
 
             xQueueReceive(statePumpQueue, &statePump, 0);
             xQueueReceive(stateFanQueue, &stateFan, 0);
@@ -383,6 +388,7 @@ void vReceiverSensor(void *pvParameters) {
             display.setCursor(10, 50);
             display.print("Servo: "); display.print(stateServo);
         } else {
+            float foodRate= 0.0;
             if (xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) == pdPASS) {
                 display.setCursor(10, 10);
                 display.print("Temp: "); display.print(sensorData.temperature); display.println(" C");
@@ -392,6 +398,10 @@ void vReceiverSensor(void *pvParameters) {
 
                 display.setCursor(10, 40);
                 display.print("Air: "); display.println(sensorData.air);
+            }
+            if (xQueueReceive(foodRateQueue, &foodRate, pdMS_TO_TICKS(1000)) == pdPASS)
+            {
+                display.setCursor(10, 50); display.print("food: "); display.print(foodRate); display.print(" %");
             }
         }
 
