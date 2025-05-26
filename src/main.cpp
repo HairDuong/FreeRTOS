@@ -9,6 +9,7 @@
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_Sensor.h>
 #include <DHT.h>
+#include <time.h>
 
 Servo myServo;
 QueueHandle_t stateFanQueue;
@@ -16,6 +17,18 @@ QueueHandle_t statePumpQueue;
 QueueHandle_t stateServorQueue;
 QueueHandle_t sensorQueue;
 QueueHandle_t foodRateQueue;
+QueueHandle_t hourQueue;
+QueueHandle_t secondQueue;
+QueueHandle_t minuteQueue;
+
+TimerHandle_t xTimerSendSensor;
+
+// Configuration for NTP Time
+const long gmtOffset_sec = 7 * 3600;   
+const int daylightOffset_sec = 0;
+struct tm timeinfo;
+
+
 
 
 #define OLED_ADDR   0x3C  
@@ -83,6 +96,7 @@ void handleFanControl(void *pvParameters);
 void mqttLoopTask(void *pvParameters);
 void callback(char *topic, byte *payload, unsigned int length);
 void vReceiverSensor(void *pvParameters);
+void automaticfeeding(void *pvParameters);
 // Định nghĩa cấu trúc chứa cả 3 giá trị
 struct SensorData {
     float temperature;
@@ -91,7 +105,7 @@ struct SensorData {
 };
 
 void vReceiverSensor(void *pvParameters);
-void vSender(void *pvParameters);
+void vSender(TimerHandle_t xTimerSendSensor);
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 DHT dht(DHTPIN, DHTTYPE);
@@ -130,6 +144,19 @@ void setup() {
     stateServorQueue = xQueueCreate(5, sizeof(char[4]));
     sensorQueue = xQueueCreate(3, sizeof(SensorData));  // Queue chứa 3 phần tử, mỗi phần tử là SensorData
     foodRateQueue = xQueueCreate(2, sizeof(float));
+    hourQueue = xQueueCreate(1, sizeof(int));
+    secondQueue = xQueueCreate(1, sizeof(int));
+    minuteQueue = xQueueCreate(1, sizeof(int));
+
+    // creat timer
+    xTimerSendSensor = xTimerCreate ("timer send sensor", pdMS_TO_TICKS(5000), pdTRUE, (void *) 0, vSender  );
+    if (xTimerSendSensor != NULL) {
+    xTimerStart(xTimerSendSensor, 0); // Bắt đầu chạy timer
+  } else {
+    Serial.println("Timer tạo thất bại!");
+  }
+
+    configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
     display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
     display.clearDisplay();
     display.setTextColor(WHITE);
@@ -186,12 +213,13 @@ void setup() {
 
     // 🔹 **Tạo các task FreeRTOS**
     xTaskCreate(readUltrasonicSensor, "readUltrasonicSensor", 8192, NULL, 2, NULL);
-    xTaskCreate(handlePumpControl, "handlePumpControl", 8192, NULL, 4, NULL);
-    xTaskCreate(handleServoControl, "handleServoControl", 8192, NULL, 4, NULL);
-    xTaskCreate(handleFanControl, "handleFanControl", 8192, NULL, 4, NULL);
-    xTaskCreate( mqttLoopTask, "mqttLoopTask", 8192, NULL, 5, NULL);
-    xTaskCreate(vSender, "Sender", 2048, NULL, 1, NULL);
-    xTaskCreate(vReceiverSensor, "Receiver", 8192, NULL, 4, NULL);
+    xTaskCreate(handlePumpControl, "handlePumpControl", 8192, NULL, 2, NULL);
+    xTaskCreate(handleServoControl, "handleServoControl", 8192, NULL, 2, NULL);
+    xTaskCreate(handleFanControl, "handleFanControl", 8192, NULL, 2, NULL);
+    xTaskCreate( mqttLoopTask, "mqttLoopTask", 8192, NULL, 3, NULL);
+  //  xTaskCreate(vSender, "Sender", 2048, NULL, 1, NULL);
+    xTaskCreate(vReceiverSensor, "Receiver", 8192, NULL, 2, NULL);
+    xTaskCreate(automaticfeeding, "automaticfeeding", 8192, NULL, 2, NULL);
     
 }
 
@@ -310,7 +338,10 @@ void callback(char *topic, byte *payload, unsigned int length) {
     char statePumpQueueValue[4];
     char stateServoQueueValue[4];
     char stateFanQueueValue[4];
-    
+    int targetHour = 0;
+    int targetMinute = 0;
+    int targetSecond = 0;
+    int targetSecondclose = 0;
     for (int i = 0; i < length; i++) message += (char)payload[i];
   
     if (String(topic) == topic4) isFanOn = (message == "ON");
@@ -319,6 +350,24 @@ void callback(char *topic, byte *payload, unsigned int length) {
         isServoAt90 = (message == "ON");
         myServo.write(isServoAt90 ? 90 : 0);
     }
+   if (String(topic) == topic15) {
+  int targetHour = message.toInt();
+  xQueueOverwrite(hourQueue, &targetHour);
+  Serial.printf("Đã nhận targetHour: %d\n", targetHour);
+}
+
+if (String(topic) == topic16) {
+  int targetMinute = message.toInt();
+  xQueueOverwrite(minuteQueue, &targetMinute);
+  Serial.printf("Đã nhận targetMinute: %d\n", targetMinute);
+}
+
+if (String(topic) == topic17) {
+  int targetSecond = message.toInt();
+  xQueueOverwrite(secondQueue, &targetSecond);
+  Serial.printf("Đã nhận targetSecond: %d\n", targetSecond);
+}
+
     digitalWrite(FAN_RELAY_PIN, isFanOn ? HIGH : LOW);
     digitalWrite(PUMP_RELAY_PIN, isPumpOn ? HIGH : LOW);
     
@@ -327,15 +376,17 @@ void callback(char *topic, byte *payload, unsigned int length) {
     strcpy(stateServoQueueValue, isServoAt90 ? "ON" : "OFF"); 
         xQueueSend(stateServorQueue, &stateServoQueueValue, 0);
     strcpy(stateFanQueueValue, isFanOn ? "ON" : "OFF"); 
-        xQueueSend(stateFanQueue, &stateFanQueueValue, 0);     
+        xQueueSend(stateFanQueue, &stateFanQueueValue, 0);  
+     
+    
   }
+    
 
   
-  void vSender(void *pvParameters) {
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    for (;;) {
+  void vSender(TimerHandle_t xTimerSendSensor) {    
+    
+    
         SensorData data;
-
         // Đọc dữ liệu từ các cảm biến
         data.temperature = dht.readTemperature();
         data.humidity = dht.readHumidity();
@@ -347,8 +398,7 @@ void callback(char *topic, byte *payload, unsigned int length) {
             data.air > 0) {
             xQueueSend(sensorQueue, &data, portMAX_DELAY);
         }
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
-    }
+    
 }
 
 void vReceiverSensor(void *pvParameters) {
@@ -358,12 +408,10 @@ void vReceiverSensor(void *pvParameters) {
 
     for (;;) {
         int OledButtonState = digitalRead(OLED_BUTTON_PIN);
-        Serial.print("Button State: "); Serial.println(OledButtonState);
-
+       
         if (OledButtonState == LOW && lastOledButtonState == HIGH) {
             currentScreen = (currentScreen + 1) % 2;
-            Serial.print("Current Screen: "); Serial.println(currentScreen);
-            delay(300);  // Tránh debounce
+            
         }
         lastOledButtonState = OledButtonState;
 
@@ -390,10 +438,10 @@ void vReceiverSensor(void *pvParameters) {
         } else {
             float foodRate= 0.0;
             if (xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) == pdPASS) {
-                display.setCursor(10, 10);
+                display.setCursor(10, 20);
                 display.print("Temp: "); display.print(sensorData.temperature); display.println(" C");
 
-                display.setCursor(10, 25);
+                display.setCursor(10, 30);
                 display.print("Humidity: "); display.print(sensorData.humidity); display.println(" %");
 
                 display.setCursor(10, 40);
@@ -408,4 +456,68 @@ void vReceiverSensor(void *pvParameters) {
         display.display();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+}
+
+void automaticfeeding(void *pvParameters) {
+  int targetHour = 0;
+  int targetMinute = 0;
+  int targetSecond = 0;
+  int targetSecondclose = 0;
+  int prevHour = -1, prevMinute = -1, prevSecond = -1;
+
+  for (;;) {
+    // Lấy thời gian thực từ NTP
+    if (!getLocalTime(&timeinfo)) {
+      Serial.println("Không thể lấy thời gian từ NTP Server");
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
+
+    // Nhận giá trị từ Queue nếu có thay đổi
+    if (xQueueReceive(hourQueue, &targetHour, 0) == pdPASS ||
+        xQueueReceive(minuteQueue, &targetMinute, 0) == pdPASS ||
+        xQueueReceive(secondQueue, &targetSecond, 0) == pdPASS) {
+      
+      targetSecondclose = targetSecond + 7;
+      if (targetSecondclose >= 60) targetSecondclose -= 60; // Xử lý tràn giây
+
+      Serial.print("Thời gian cho ăn đã được đặt: ");
+      Serial.printf("%02d:%02d:%02d (Đóng lại lúc %02d)\n", 
+        targetHour, targetMinute, targetSecond, targetSecondclose);
+    }
+
+    // In ra thời gian hiện tại (1 lần mỗi giây)
+    if (timeinfo.tm_sec != prevSecond) {
+      prevHour = timeinfo.tm_hour;
+      prevMinute = timeinfo.tm_min;
+      prevSecond = timeinfo.tm_sec;
+
+      Serial.printf("Thời gian hiện tại: %02d:%02d:%02d\n", 
+        prevHour, prevMinute, prevSecond);
+    }
+
+    // Nếu đúng giờ mở nắp (servo về 0)
+    if (timeinfo.tm_hour == targetHour &&
+        timeinfo.tm_min == targetMinute &&
+        timeinfo.tm_sec == targetSecond) {
+      
+      if (myServo.read() != 0) {
+        myServo.write(0);
+        Serial.println("→ Servo mở nắp (0 độ)");
+      }
+    }
+
+    // Nếu đúng giờ đóng nắp (servo về 90)
+    if (timeinfo.tm_hour == targetHour &&
+        timeinfo.tm_min == targetMinute &&
+        timeinfo.tm_sec == targetSecondclose) {
+      
+      if (myServo.read() != 90) {
+        myServo.write(90);
+        Serial.println("→ Servo đóng nắp (90 độ)");
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(500));  // Lặp lại sau 500ms
+  }
 }
