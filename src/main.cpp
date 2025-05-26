@@ -22,6 +22,7 @@ QueueHandle_t secondQueue;
 QueueHandle_t minuteQueue;
 
 TimerHandle_t xTimerSendSensor;
+SemaphoreHandle_t xMutex;
 
 // Configuration for NTP Time
 const long gmtOffset_sec = 7 * 3600;   
@@ -41,6 +42,7 @@ struct tm timeinfo;
 #define CUSTOM_SCK  22    // I2C OLED SCL
 
 #define OLED_BUTTON_PIN  16  // Nút nhấn OLED
+#define MODE_BUTTON_PIN  15 // chuyen doi auto sang thu cong
 
 // 🔹 **Chân siêu âm**
 #define TRIG_PIN1        18
@@ -97,6 +99,7 @@ void mqttLoopTask(void *pvParameters);
 void callback(char *topic, byte *payload, unsigned int length);
 void vReceiverSensor(void *pvParameters);
 void automaticfeeding(void *pvParameters);
+
 // Định nghĩa cấu trúc chứa cả 3 giá trị
 struct SensorData {
     float temperature;
@@ -104,6 +107,7 @@ struct SensorData {
     float air;
 };
 
+void vControlDevice(const SensorData &data);
 void vReceiverSensor(void *pvParameters);
 void vSender(TimerHandle_t xTimerSendSensor);
 
@@ -133,15 +137,16 @@ void setup() {
     pinMode(PUMP_RELAY_PIN, OUTPUT);
     pinMode(FAN_RELAY_PIN, OUTPUT);
     pinMode(OLED_BUTTON_PIN, INPUT_PULLUP);
+    pinMode(MODE_BUTTON_PIN, INPUT_PULLUP);
 
     digitalWrite(PUMP_RELAY_PIN, LOW);
     digitalWrite(FAN_RELAY_PIN, LOW);
 
     // Create Queue
     
-    stateFanQueue = xQueueCreate(5, sizeof(char[4])); 
-    statePumpQueue = xQueueCreate(5, sizeof(char[4]));
-    stateServorQueue = xQueueCreate(5, sizeof(char[4]));
+    stateFanQueue = xQueueCreate(1, sizeof(char[4])); 
+    statePumpQueue = xQueueCreate(1, sizeof(char[4]));
+    stateServorQueue = xQueueCreate(1, sizeof(char[4]));
     sensorQueue = xQueueCreate(3, sizeof(SensorData));  // Queue chứa 3 phần tử, mỗi phần tử là SensorData
     foodRateQueue = xQueueCreate(2, sizeof(float));
     hourQueue = xQueueCreate(1, sizeof(int));
@@ -155,6 +160,8 @@ void setup() {
   } else {
     Serial.println("Timer tạo thất bại!");
   }
+    // mutex create
+     xMutex = xSemaphoreCreateMutex();
 
     configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
     display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
@@ -384,8 +391,7 @@ if (String(topic) == topic17) {
 
   
   void vSender(TimerHandle_t xTimerSendSensor) {    
-    
-    
+
         SensorData data;
         // Đọc dữ liệu từ các cảm biến
         data.temperature = dht.readTemperature();
@@ -398,6 +404,10 @@ if (String(topic) == topic17) {
             data.air > 0) {
             xQueueSend(sensorQueue, &data, portMAX_DELAY);
         }
+        
+        
+         
+        
     
 }
 
@@ -406,14 +416,35 @@ void vReceiverSensor(void *pvParameters) {
     bool lastOledButtonState = HIGH;
     int currentScreen = 0;
 
+        bool isAuto = true;
+    bool lastModebutton = HIGH;
+    bool Modebutton = digitalRead(MODE_BUTTON_PIN);
+    
+
     for (;;) {
         int OledButtonState = digitalRead(OLED_BUTTON_PIN);
-       
+        
+
         if (OledButtonState == LOW && lastOledButtonState == HIGH) {
             currentScreen = (currentScreen + 1) % 2;
+           
             
         }
         lastOledButtonState = OledButtonState;
+
+         // Xử lý nút nhấn chuyển chế độ
+    if (Modebutton == LOW && lastModebutton == HIGH) {
+        isAuto = !isAuto;
+        Serial.print("Mode hiện tại là: ");
+        Serial.println(isAuto ? "AUTO" : "MANUAL");
+    }
+
+    lastModebutton = Modebutton;  // Cập nhật sau khi xử lý
+
+    // Nếu đang ở chế độ tự động thì điều khiển thiết bị
+    if (isAuto) {
+        vControlDevice(sensorData);
+    }
 
         display.clearDisplay();
 
@@ -437,7 +468,7 @@ void vReceiverSensor(void *pvParameters) {
             display.print("Servo: "); display.print(stateServo);
         } else {
             float foodRate= 0.0;
-            if (xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) == pdPASS) {
+           xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) ;
                 display.setCursor(10, 20);
                 display.print("Temp: "); display.print(sensorData.temperature); display.println(" C");
 
@@ -446,17 +477,53 @@ void vReceiverSensor(void *pvParameters) {
 
                 display.setCursor(10, 40);
                 display.print("Air: "); display.println(sensorData.air);
-            }
-            if (xQueueReceive(foodRateQueue, &foodRate, pdMS_TO_TICKS(1000)) == pdPASS)
-            {
+            
+            xQueueReceive(foodRateQueue, &foodRate, pdMS_TO_TICKS(1000)) ;
+            
                 display.setCursor(10, 50); display.print("food: "); display.print(foodRate); display.print(" %");
-            }
+            
         }
 
         display.display();
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
+
+void vControlDevice(const SensorData &data) {
+   
+ 
+  if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
+    if (data.temperature > 31) {
+        char stateFanQueueValue[4];
+     
+      Serial.println("⚠️ Cảnh báo: Nhiệt độ vượt ngưỡng!");
+      
+      client.publish(topic4, "ON" );
+      digitalWrite(FAN_RELAY_PIN, HIGH );
+       strcpy(stateFanQueueValue,  "ON" ); 
+            xQueueSend(stateFanQueue, &stateFanQueueValue, 0);
+
+    }
+    
+
+    if (data.air > 500) {
+        char statePumpQueueValue[4];
+         
+      Serial.println("⚠️ Cảnh báo: Chất lượng không khí vượt ngưỡng!");
+       
+        strcpy(statePumpQueueValue,  "ON" ); 
+            xQueueSend(statePumpQueue, &statePumpQueueValue, 0);
+            
+             digitalWrite(PUMP_RELAY_PIN,  HIGH );
+              client.publish(topic5,  "ON" ); 
+            
+    } 
+
+    xSemaphoreGive(xMutex);
+  
+  }
+}
+
 
 void automaticfeeding(void *pvParameters) {
   int targetHour = 0;
@@ -503,7 +570,7 @@ void automaticfeeding(void *pvParameters) {
       
       if (myServo.read() != 0) {
         myServo.write(0);
-        Serial.println("→ Servo mở nắp (0 độ)");
+        
       }
     }
 
@@ -514,7 +581,7 @@ void automaticfeeding(void *pvParameters) {
       
       if (myServo.read() != 90) {
         myServo.write(90);
-        Serial.println("→ Servo đóng nắp (90 độ)");
+       
       }
     }
 
