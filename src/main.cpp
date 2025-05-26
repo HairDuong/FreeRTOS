@@ -23,6 +23,10 @@ QueueHandle_t minuteQueue;
 
 TimerHandle_t xTimerSendSensor;
 SemaphoreHandle_t xMutex;
+SemaphoreHandle_t xPumpButtonsemaphore;
+SemaphoreHandle_t xFanButtonsemaphore;
+SemaphoreHandle_t xServoButtonsemaphore;
+SemaphoreHandle_t xScreenButtonsemaphore;
 
 // Configuration for NTP Time
 const long gmtOffset_sec = 7 * 3600;   
@@ -110,6 +114,7 @@ struct SensorData {
 void vControlDevice(const SensorData &data);
 void vReceiverSensor(void *pvParameters);
 void vSender(TimerHandle_t xTimerSendSensor);
+void IRAM_ATTR buttonISR();
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 DHT dht(DHTPIN, DHTTYPE);
@@ -123,6 +128,18 @@ void setup() {
     Wire.begin();
     dht.begin();
     pinMode(AIR_SENSOR, INPUT); 
+
+    
+  xPumpButtonsemaphore = xSemaphoreCreateBinary();
+  xFanButtonsemaphore = xSemaphoreCreateBinary();
+  xServoButtonsemaphore = xSemaphoreCreateBinary();
+  xScreenButtonsemaphore = xSemaphoreCreateBinary();
+
+
+  attachInterrupt(digitalPinToInterrupt(PUMP_BUTTON_PIN), buttonISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(FAN_BUTTON_PIN), buttonISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(SERVO_BUTTON_PIN), buttonISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(OLED_BUTTON_PIN), buttonISR, FALLING);
     
 
 
@@ -269,70 +286,70 @@ void readUltrasonicSensor(void *pvParameters) {
 }
 
 // 🔹 **Task điều khiển máy bơm**
-void handlePumpControl(void *pvParameters) {
+void handlePumpControl(void *pvParameters) 
+{
+
     bool isPumpOn = false;
-    bool lastPumpButtonState = HIGH;
+    
     char statePumpQueueValue[4];
     for (;;) {
-        bool pumpButtonState = digitalRead(PUMP_BUTTON_PIN);
-
-        if (pumpButtonState == LOW && lastPumpButtonState == HIGH) {
+        if (xSemaphoreTake(xPumpButtonsemaphore, portMAX_DELAY))
+        {
+        
             isPumpOn = !isPumpOn;
             digitalWrite(PUMP_RELAY_PIN, isPumpOn ? HIGH : LOW);
             client.publish(topic5, isPumpOn ? "ON" : "OFF"); 
             strcpy(statePumpQueueValue, isPumpOn ? "ON" : "OFF"); 
             xQueueSend(statePumpQueue, &statePumpQueueValue, 0);
-        }
-       
-        
-        
-        lastPumpButtonState = pumpButtonState;
         
         vTaskDelay(pdMS_TO_TICKS(50));  // Debounce nút nhấn
+        }
     }
 }
 
 // 🔹 **Task điều khiển Servo**
 void handleServoControl(void *pvParameters) {
     bool isServoAt90 = false;
-    bool lastServoButtonState = HIGH;
+    
     
 
     for (;;) {
-        bool currentServoButtonState = digitalRead(SERVO_BUTTON_PIN);
+        if (xSemaphoreTake(xServoButtonsemaphore, portMAX_DELAY))
+        {
         char stateServoQueueValue[4];
 
-        if (currentServoButtonState == LOW && lastServoButtonState == HIGH) {
+        
             isServoAt90 = !isServoAt90;
             myServo.write(isServoAt90 ? 90 : 0);
             strcpy(stateServoQueueValue, isServoAt90 ? "ON" : "OFF"); 
             xQueueSend(stateServorQueue, &stateServoQueueValue, 0);
             client.publish(topic7, isServoAt90 ? "ON" : "OFF");
-        }
-        
-        lastServoButtonState = currentServoButtonState;
         
         vTaskDelay(pdMS_TO_TICKS(50));  // Debounce
+        }
     }
 }
  
 // 🔹 **Task điều khiển quạt**
 void handleFanControl(void *pvParameters) {
     bool isFanOn = false;
-    bool lastFanButtonState = HIGH;
+    
 
     for (;;) {
-        bool fanButtonState = digitalRead(FAN_BUTTON_PIN);
+        
         char stateFanQueueValue[4];
-        if (fanButtonState == LOW && lastFanButtonState == HIGH) {
+        if (xSemaphoreTake(xFanButtonsemaphore, portMAX_DELAY))
+        {
+       
             isFanOn = !isFanOn;
-            client.publish(topic4, isFanOn ? "ON" : "OFF");
+            
             digitalWrite(FAN_RELAY_PIN, isFanOn ? HIGH : LOW);
             strcpy(stateFanQueueValue, isFanOn ? "ON" : "OFF"); 
+            client.publish(topic4, isFanOn ? "ON" : "OFF");
             xQueueSend(stateFanQueue, &stateFanQueueValue, 0);
-        }
+        
 
-        lastFanButtonState = fanButtonState;
+        }
         vTaskDelay(pdMS_TO_TICKS(50));  // Debounce
     }
 }
@@ -391,7 +408,8 @@ if (String(topic) == topic17) {
 
   
   void vSender(TimerHandle_t xTimerSendSensor) {    
-
+  
+    
         SensorData data;
         // Đọc dữ liệu từ các cảm biến
         data.temperature = dht.readTemperature();
@@ -404,48 +422,23 @@ if (String(topic) == topic17) {
             data.air > 0) {
             xQueueSend(sensorQueue, &data, portMAX_DELAY);
         }
-        
-        
-         
-        
+                     vControlDevice(data);
     
-}
+    }
 
 void vReceiverSensor(void *pvParameters) {
     SensorData sensorData = {0, 0, 0};
-    bool lastOledButtonState = HIGH;
+    
     int currentScreen = 0;
 
-        bool isAuto = true;
-    bool lastModebutton = HIGH;
-    bool Modebutton = digitalRead(MODE_BUTTON_PIN);
-    
-
     for (;;) {
-        int OledButtonState = digitalRead(OLED_BUTTON_PIN);
+       
         
 
-        if (OledButtonState == LOW && lastOledButtonState == HIGH) {
-            currentScreen = (currentScreen + 1) % 2;
-           
-            
+        if (xSemaphoreTake(xScreenButtonsemaphore, 0) == pdTRUE) {
+         currentScreen = (currentScreen + 1) % 2;
         }
-        lastOledButtonState = OledButtonState;
-
-         // Xử lý nút nhấn chuyển chế độ
-    if (Modebutton == LOW && lastModebutton == HIGH) {
-        isAuto = !isAuto;
-        Serial.print("Mode hiện tại là: ");
-        Serial.println(isAuto ? "AUTO" : "MANUAL");
-    }
-
-    lastModebutton = Modebutton;  // Cập nhật sau khi xử lý
-
-    // Nếu đang ở chế độ tự động thì điều khiển thiết bị
-    if (isAuto) {
-        vControlDevice(sensorData);
-    }
-
+        
         display.clearDisplay();
 
         if (currentScreen == 0) {
@@ -493,7 +486,7 @@ void vControlDevice(const SensorData &data) {
    
  
   if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
-    if (data.temperature > 31) {
+    if (data.temperature > 35) {
         char stateFanQueueValue[4];
      
       Serial.println("⚠️ Cảnh báo: Nhiệt độ vượt ngưỡng!");
@@ -506,7 +499,7 @@ void vControlDevice(const SensorData &data) {
     }
     
 
-    if (data.air > 500) {
+    if (data.air > 1000) {
         char statePumpQueueValue[4];
          
       Serial.println("⚠️ Cảnh báo: Chất lượng không khí vượt ngưỡng!");
@@ -588,3 +581,24 @@ void automaticfeeding(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(500));  // Lặp lại sau 500ms
   }
 }
+
+void IRAM_ATTR buttonISR() {
+  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+  // Kiểm tra trạng thái các nút
+  if (digitalRead(PUMP_BUTTON_PIN) == LOW) {
+    xSemaphoreGiveFromISR(xPumpButtonsemaphore, &xHigherPriorityTaskWoken);
+  }
+  if (digitalRead(FAN_BUTTON_PIN) == LOW) {
+    xSemaphoreGiveFromISR(xFanButtonsemaphore, &xHigherPriorityTaskWoken);
+  }
+   if (digitalRead(SERVO_BUTTON_PIN) == LOW) {
+    xSemaphoreGiveFromISR(xServoButtonsemaphore, &xHigherPriorityTaskWoken);
+  }
+  if (digitalRead(OLED_BUTTON_PIN) == LOW) {
+    xSemaphoreGiveFromISR(xScreenButtonsemaphore, &xHigherPriorityTaskWoken);
+  }
+
+  portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
