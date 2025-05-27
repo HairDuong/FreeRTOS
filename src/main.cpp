@@ -28,6 +28,8 @@ SemaphoreHandle_t xPumpButtonsemaphore;
 SemaphoreHandle_t xFanButtonsemaphore;
 SemaphoreHandle_t xServoButtonsemaphore;
 SemaphoreHandle_t xScreenButtonsemaphore;
+SemaphoreHandle_t xModeButtonSemaphore;
+volatile bool isAutoMode = true;  // Mặc định bật chế độ tự động
 
 // Configuration for NTP Time
 const long gmtOffset_sec = 7 * 3600;   
@@ -108,6 +110,7 @@ void mqttLoopTask(void *pvParameters);
 void callback(char *topic, byte *payload, unsigned int length);
 void vReceiverSensor(void *pvParameters);
 void automaticfeeding(void *pvParameters);
+void vHandleModeButton(void *pvParameters);
 
 // Định nghĩa cấu trúc chứa cả 3 giá trị
 struct SensorData {
@@ -139,12 +142,15 @@ void setup() {
   xFanButtonsemaphore = xSemaphoreCreateBinary();
   xServoButtonsemaphore = xSemaphoreCreateBinary();
   xScreenButtonsemaphore = xSemaphoreCreateBinary();
+  xModeButtonSemaphore = xSemaphoreCreateBinary();
+  
 
 
   attachInterrupt(digitalPinToInterrupt(PUMP_BUTTON_PIN), buttonISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(FAN_BUTTON_PIN), buttonISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(SERVO_BUTTON_PIN), buttonISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(OLED_BUTTON_PIN), buttonISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(MODE_BUTTON_PIN), buttonISR, FALLING);
     
 
 
@@ -247,9 +253,9 @@ void setup() {
     xTaskCreate(handleServoControl, "handleServoControl", 8192, NULL, 2, NULL);
     xTaskCreate(handleFanControl, "handleFanControl", 8192, NULL, 2, NULL);
     xTaskCreate( mqttLoopTask, "mqttLoopTask", 8192, NULL, 3, NULL);
-  //  xTaskCreate(vSender, "Sender", 2048, NULL, 1, NULL);
     xTaskCreate(vReceiverSensor, "Receiver", 8192, NULL, 2, NULL);
     xTaskCreate(automaticfeeding, "automaticfeeding", 8192, NULL, 2, NULL);
+    xTaskCreate(vHandleModeButton, "automaticfeeding", 8192, NULL, 2, NULL);
     
 }
 
@@ -432,7 +438,7 @@ if (String(topic) == topic17) {
             data.air > 0) {
             xQueueSend(sensorQueue, &data, portMAX_DELAY);
         }
-                     autoControlDevice(data);
+                 autoControlDevice(data);     
     
     }
 
@@ -448,6 +454,7 @@ void vReceiverSensor(void *pvParameters) {
         if (xSemaphoreTake(xScreenButtonsemaphore, 0) == pdTRUE) {
          currentScreen = (currentScreen + 1) % 2;
         }
+
         
         display.clearDisplay();
 
@@ -460,6 +467,8 @@ void vReceiverSensor(void *pvParameters) {
             xQueueReceive(statePumpQueue, &statePump, 0);
             xQueueReceive(stateFanQueue, &stateFan, 0);
             xQueueReceive(stateServorQueue, &stateServo, 0);
+
+           
 
             display.setCursor(10, 20);
             display.print("Pump: "); display.print(statePump);
@@ -492,12 +501,24 @@ void vReceiverSensor(void *pvParameters) {
     }
 }
 
+void vHandleModeButton(void *pvParameters) {
+  for (;;) {
+    if (xSemaphoreTake(xModeButtonSemaphore, portMAX_DELAY) == pdTRUE) {
+      // Chuyển trạng thái chế độ
+     
+      isAutoMode = !isAutoMode;
+      Serial.print(" chuyen mode thanh cong");
+    }
+  }
+}
+
 
 void autoControlDevice(const SensorData &data) {
+  if (!isAutoMode) return;
     char stateFanQueueValue[4];
     char statePumpQueueValue[4];
  
-    if (data.temperature > 32) {
+    if (data.temperature > 30 ) {
       if (xSemaphoreTake(xFanMutex, portMAX_DELAY) == pdTRUE) 
       {
         Serial.println("⚠️ Cảnh báo: Nhiệt độ vượt ngưỡng!");
@@ -606,6 +627,9 @@ void IRAM_ATTR buttonISR() {
   }
   if (digitalRead(OLED_BUTTON_PIN) == LOW) {
     xSemaphoreGiveFromISR(xScreenButtonsemaphore, &xHigherPriorityTaskWoken);
+  }
+  if (digitalRead(MODE_BUTTON_PIN) == LOW) {
+    xSemaphoreGiveFromISR(xModeButtonSemaphore, &xHigherPriorityTaskWoken);
   }
 
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
