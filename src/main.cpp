@@ -22,7 +22,8 @@ QueueHandle_t secondQueue;
 QueueHandle_t minuteQueue;
 
 TimerHandle_t xTimerSendSensor;
-SemaphoreHandle_t xMutex;
+SemaphoreHandle_t xPumpMutex;
+SemaphoreHandle_t xFanMutex;
 SemaphoreHandle_t xPumpButtonsemaphore;
 SemaphoreHandle_t xFanButtonsemaphore;
 SemaphoreHandle_t xServoButtonsemaphore;
@@ -32,6 +33,10 @@ SemaphoreHandle_t xScreenButtonsemaphore;
 const long gmtOffset_sec = 7 * 3600;   
 const int daylightOffset_sec = 0;
 struct tm timeinfo;
+
+ bool isPumpOn = false;
+ bool isFanOn = false;
+ bool isServoAt90 = false;
 
 
 
@@ -111,7 +116,7 @@ struct SensorData {
     float air;
 };
 
-void vControlDevice(const SensorData &data);
+void autoControlDevice(const SensorData &data);
 void vReceiverSensor(void *pvParameters);
 void vSender(TimerHandle_t xTimerSendSensor);
 void IRAM_ATTR buttonISR();
@@ -171,14 +176,15 @@ void setup() {
     minuteQueue = xQueueCreate(1, sizeof(int));
 
     // creat timer
-    xTimerSendSensor = xTimerCreate ("timer send sensor", pdMS_TO_TICKS(5000), pdTRUE, (void *) 0, vSender  );
+    xTimerSendSensor = xTimerCreate ("timer send sensor", pdMS_TO_TICKS(3000), pdTRUE, (void *) 0, vSender  );
     if (xTimerSendSensor != NULL) {
     xTimerStart(xTimerSendSensor, 0); // Bắt đầu chạy timer
   } else {
     Serial.println("Timer tạo thất bại!");
   }
     // mutex create
-     xMutex = xSemaphoreCreateMutex();
+     xPumpMutex = xSemaphoreCreateMutex();
+     xFanMutex = xSemaphoreCreateMutex();
 
     configTime(gmtOffset_sec, daylightOffset_sec, "pool.ntp.org", "time.nist.gov");
     display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);
@@ -278,6 +284,7 @@ void readUltrasonicSensor(void *pvParameters) {
 
         float foodAvailable = (1.0 - (distance / distanceOrigin)) * 100.0;
         foodRateValue = foodAvailable;
+        client.publish(topic3, String(foodAvailable).c_str());
         xQueueSend(foodRateQueue, &foodRateValue, 0);
         Serial.print("Food rate: ");
         Serial.println(foodAvailable);
@@ -288,35 +295,38 @@ void readUltrasonicSensor(void *pvParameters) {
 // 🔹 **Task điều khiển máy bơm**
 void handlePumpControl(void *pvParameters) 
 {
+      char statePumpQueueValue[4];
+      for (;;) 
+      {
 
-    bool isPumpOn = false;
-    
-    char statePumpQueueValue[4];
-    for (;;) {
-        if (xSemaphoreTake(xPumpButtonsemaphore, portMAX_DELAY))
-        {
+        
+           if (xSemaphoreTake(xPumpButtonsemaphore, portMAX_DELAY))
+          {
+            if( xSemaphoreTake(xPumpMutex, portMAX_DELAY) == pdTRUE) 
+             {
         
             isPumpOn = !isPumpOn;
             digitalWrite(PUMP_RELAY_PIN, isPumpOn ? HIGH : LOW);
             client.publish(topic5, isPumpOn ? "ON" : "OFF"); 
             strcpy(statePumpQueueValue, isPumpOn ? "ON" : "OFF"); 
             xQueueSend(statePumpQueue, &statePumpQueueValue, 0);
-        
-        vTaskDelay(pdMS_TO_TICKS(50));  // Debounce nút nhấn
+             }
+          xSemaphoreGive(xPumpMutex);
         }
-    }
+          
+      }
 }
 
 // 🔹 **Task điều khiển Servo**
 void handleServoControl(void *pvParameters) {
-    bool isServoAt90 = false;
+   
     
-    
+    char stateServoQueueValue[4];
 
     for (;;) {
         if (xSemaphoreTake(xServoButtonsemaphore, portMAX_DELAY))
         {
-        char stateServoQueueValue[4];
+        
 
         
             isServoAt90 = !isServoAt90;
@@ -325,40 +335,37 @@ void handleServoControl(void *pvParameters) {
             xQueueSend(stateServorQueue, &stateServoQueueValue, 0);
             client.publish(topic7, isServoAt90 ? "ON" : "OFF");
         
-        vTaskDelay(pdMS_TO_TICKS(50));  // Debounce
+   
         }
     }
 }
  
 // 🔹 **Task điều khiển quạt**
 void handleFanControl(void *pvParameters) {
-    bool isFanOn = false;
-    
+  
+    char stateFanQueueValue[4];
 
     for (;;) {
-        
-        char stateFanQueueValue[4];
-        if (xSemaphoreTake(xFanButtonsemaphore, portMAX_DELAY))
-        {
        
-            isFanOn = !isFanOn;
-            
-            digitalWrite(FAN_RELAY_PIN, isFanOn ? HIGH : LOW);
-            strcpy(stateFanQueueValue, isFanOn ? "ON" : "OFF"); 
-            client.publish(topic4, isFanOn ? "ON" : "OFF");
-            xQueueSend(stateFanQueue, &stateFanQueueValue, 0);
-        
-
-        }
-        vTaskDelay(pdMS_TO_TICKS(50));  // Debounce
+            if (xSemaphoreTake(xFanButtonsemaphore, portMAX_DELAY))
+            {
+               if( xSemaphoreTake(xFanMutex, portMAX_DELAY) == pdTRUE) 
+           {
+              isFanOn = !isFanOn;
+              
+              digitalWrite(FAN_RELAY_PIN, isFanOn ? HIGH : LOW);
+              strcpy(stateFanQueueValue, isFanOn ? "ON" : "OFF"); 
+              client.publish(topic4, isFanOn ? "ON" : "OFF");
+              xQueueSend(stateFanQueue, &stateFanQueueValue, 0);
+            }
+            xSemaphoreGive(xFanMutex);
+          }
     }
 }
 
 void callback(char *topic, byte *payload, unsigned int length) {
     String message;
-    bool isPumpOn = false;
-    bool isFanOn = false;
-    bool isServoAt90 = false;
+
     char statePumpQueueValue[4];
     char stateServoQueueValue[4];
     char stateFanQueueValue[4];
@@ -415,6 +422,9 @@ if (String(topic) == topic17) {
         data.temperature = dht.readTemperature();
         data.humidity = dht.readHumidity();
         data.air = analogRead(AIR_SENSOR);
+        client.publish(topic0, String(data.temperature).c_str());
+        client.publish(topic1, String(data.humidity).c_str());
+        client.publish(topic2, String(data.air).c_str());
 
         // Kiểm tra dữ liệu hợp lệ trước khi gửi
         if (!isnan(data.temperature) && data.temperature > 0 &&
@@ -422,7 +432,7 @@ if (String(topic) == topic17) {
             data.air > 0) {
             xQueueSend(sensorQueue, &data, portMAX_DELAY);
         }
-                     vControlDevice(data);
+                     autoControlDevice(data);
     
     }
 
@@ -482,40 +492,39 @@ void vReceiverSensor(void *pvParameters) {
     }
 }
 
-void vControlDevice(const SensorData &data) {
-   
- 
-  if (xSemaphoreTake(xMutex, portMAX_DELAY) == pdTRUE) {
-    if (data.temperature > 35) {
-        char stateFanQueueValue[4];
-     
-      Serial.println("⚠️ Cảnh báo: Nhiệt độ vượt ngưỡng!");
-      
-      client.publish(topic4, "ON" );
-      digitalWrite(FAN_RELAY_PIN, HIGH );
-       strcpy(stateFanQueueValue,  "ON" ); 
-            xQueueSend(stateFanQueue, &stateFanQueueValue, 0);
 
+void autoControlDevice(const SensorData &data) {
+    char stateFanQueueValue[4];
+    char statePumpQueueValue[4];
+ 
+    if (data.temperature > 32) {
+      if (xSemaphoreTake(xFanMutex, portMAX_DELAY) == pdTRUE) 
+      {
+        Serial.println("⚠️ Cảnh báo: Nhiệt độ vượt ngưỡng!");
+      
+        client.publish(topic4, "ON" );
+        digitalWrite(FAN_RELAY_PIN, HIGH );
+        strcpy(stateFanQueueValue,  "ON" ); 
+        xQueueSend(stateFanQueue, &stateFanQueueValue, 0);
+      }
+      xSemaphoreGive(xFanMutex);
     }
     
 
     if (data.air > 1000) {
-        char statePumpQueueValue[4];
-         
-      Serial.println("⚠️ Cảnh báo: Chất lượng không khí vượt ngưỡng!");
+      if (xSemaphoreTake(xPumpMutex, portMAX_DELAY) == pdTRUE) 
+      {
+        Serial.println("⚠️ Cảnh báo: Chất lượng không khí vượt ngưỡng!");
        
         strcpy(statePumpQueueValue,  "ON" ); 
-            xQueueSend(statePumpQueue, &statePumpQueueValue, 0);
-            
-             digitalWrite(PUMP_RELAY_PIN,  HIGH );
-              client.publish(topic5,  "ON" ); 
-            
+        xQueueSend(statePumpQueue, &statePumpQueueValue, 0);    
+        digitalWrite(PUMP_RELAY_PIN,  HIGH );
+        client.publish(topic5,  "ON" ); 
+      } 
+      xSemaphoreGive(xPumpMutex);   
     } 
-
-    xSemaphoreGive(xMutex);
-  
-  }
 }
+
 
 
 void automaticfeeding(void *pvParameters) {
