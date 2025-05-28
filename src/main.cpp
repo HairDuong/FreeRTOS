@@ -111,6 +111,8 @@ void callback(char *topic, byte *payload, unsigned int length);
 void vReceiverSensor(void *pvParameters);
 void automaticfeeding(void *pvParameters);
 void vHandleModeButton(void *pvParameters);
+void reconnectMQTT() ;
+
 
 // Định nghĩa cấu trúc chứa cả 3 giá trị
 struct SensorData {
@@ -132,7 +134,7 @@ DHT dht(DHTPIN, DHTTYPE);
 void setup() {
     Serial.begin(9600);
     myServo.attach(SERVO_PIN);
-    myServo.write(90);  // Gán vị trí ban đầu cho Servo
+    myServo.write(0);  // Gán vị trí ban đầu cho Servo
     Wire.begin();
     dht.begin();
     pinMode(AIR_SENSOR, INPUT); 
@@ -256,6 +258,7 @@ void setup() {
     xTaskCreate(vReceiverSensor, "Receiver", 8192, NULL, 2, NULL);
     xTaskCreate(automaticfeeding, "automaticfeeding", 8192, NULL, 2, NULL);
     xTaskCreate(vHandleModeButton, "automaticfeeding", 8192, NULL, 2, NULL);
+
     
 }
 
@@ -264,11 +267,37 @@ void loop() {
 }
 
 void mqttLoopTask(void *pvParameters) {
-    for (;;) {
-        client.loop();
-        vTaskDelay(pdMS_TO_TICKS(10));  // Tránh chiếm CPU quá mức
+  for (;;) {
+    if (!client.connected()) {
+      reconnectMQTT(); // Gọi lại hàm connect nếu mất kết nối
     }
+    client.loop();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
+void reconnectMQTT() {
+  while (!client.connected()) {
+    Serial.println("MQTT disconnected. Reconnecting...");
+    String clientId = "esp32-client-" + String(random(0xffff), HEX);
+    if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
+      Serial.println("Reconnected to MQTT!");
+        client.subscribe(topic4);
+  client.subscribe(topic5);
+  client.subscribe(topic6);
+  client.subscribe(topic7);
+  client.subscribe(topic8);
+  client.subscribe(topic9);
+  client.subscribe(topic15);
+  client.subscribe(topic16);
+  client.subscribe(topic17);
+    } else {
+      Serial.print("MQTT reconnect failed. State=");
+      Serial.println(client.state());
+      delay(2000);
+    }
+  }
+}
+
 // 🔹 **Task đọc cảm biến siêu âm**
 void readUltrasonicSensor(void *pvParameters) {
     long duration1;
@@ -380,7 +409,8 @@ void callback(char *topic, byte *payload, unsigned int length) {
     int targetSecond = 0;
     int targetSecondclose = 0;
     for (int i = 0; i < length; i++) message += (char)payload[i];
-  
+
+    if (String(topic) == topic6) isAutoMode = (message == "ON");
     if (String(topic) == topic4) isFanOn = (message == "ON");
     if (String(topic) == topic5) isPumpOn = (message == "ON");
     if (String(topic) == topic7) {
@@ -452,9 +482,7 @@ void vReceiverSensor(void *pvParameters) {
     int currentScreen = 0;
 
     for (;;) {
-           xQueueReceive(statePumpQueue, &statePump, 0);
-            xQueueReceive(stateFanQueue, &stateFan, 0);
-            xQueueReceive(stateServorQueue, &stateServo, 0);
+           
             xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) ;
         
 
@@ -466,7 +494,9 @@ void vReceiverSensor(void *pvParameters) {
         display.clearDisplay();
 
         if (currentScreen == 0) {
-           
+           xQueueReceive(statePumpQueue, &statePump, 0);
+            xQueueReceive(stateFanQueue, &stateFan, 0);
+            xQueueReceive(stateServorQueue, &stateServo, 0);
 
             
 
@@ -509,6 +539,7 @@ void vHandleModeButton(void *pvParameters) {
       // Chuyển trạng thái chế độ
      
       isAutoMode = !isAutoMode;
+      client.publish(topic6, isAutoMode ? "ON":"OFF");
       Serial.print(" chuyen mode thanh cong");
     }
   }
@@ -593,8 +624,8 @@ void automaticfeeding(void *pvParameters) {
         timeinfo.tm_min == targetMinute &&
         timeinfo.tm_sec == targetSecond) {
       
-      if (myServo.read() != 0) {
-        myServo.write(0);
+      if (myServo.read() != 90) {
+        myServo.write(90);
         
       }
     }
@@ -604,8 +635,8 @@ void automaticfeeding(void *pvParameters) {
         timeinfo.tm_min == targetMinute &&
         timeinfo.tm_sec == targetSecondclose) {
       
-      if (myServo.read() != 90) {
-        myServo.write(90);
+      if (myServo.read() != 0) {
+        myServo.write(0);
        
       }
     }
