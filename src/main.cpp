@@ -444,11 +444,18 @@ if (String(topic) == topic17) {
 
 void vReceiverSensor(void *pvParameters) {
     SensorData sensorData = {0, 0, 0};
+    char statePump[4];
+    char stateFan[4];
+    char stateServo[4];
+           
     
     int currentScreen = 0;
 
     for (;;) {
-       
+           xQueueReceive(statePumpQueue, &statePump, 0);
+            xQueueReceive(stateFanQueue, &stateFan, 0);
+            xQueueReceive(stateServorQueue, &stateServo, 0);
+            xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) ;
         
 
         if (xSemaphoreTake(xScreenButtonsemaphore, 0) == pdTRUE) {
@@ -459,14 +466,9 @@ void vReceiverSensor(void *pvParameters) {
         display.clearDisplay();
 
         if (currentScreen == 0) {
-            char statePump[4];
-            char stateFan[4];
-            char stateServo[4];
            
 
-            xQueueReceive(statePumpQueue, &statePump, 0);
-            xQueueReceive(stateFanQueue, &stateFan, 0);
-            xQueueReceive(stateServorQueue, &stateServo, 0);
+            
 
            
 
@@ -480,7 +482,7 @@ void vReceiverSensor(void *pvParameters) {
             display.print("Servo: "); display.print(stateServo);
         } else {
             float foodRate= 0.0;
-           xQueueReceive(sensorQueue, &sensorData, pdMS_TO_TICKS(1000)) ;
+           
                 display.setCursor(10, 20);
                 display.print("Temp: "); display.print(sensorData.temperature); display.println(" C");
 
@@ -634,4 +636,3 @@ void IRAM_ATTR buttonISR() {
 
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
